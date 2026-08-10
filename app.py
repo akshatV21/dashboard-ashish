@@ -40,8 +40,8 @@ with st.sidebar:
         # Ask for admin password
         admin_password = st.text_input("Enter Admin Password", type="password")
         
-        # Set your secret password here (Change 'Admin123!' to your desired secure password)
-        if admin_password == "Ash1985!":
+        # Set your secret password here
+        if admin_password == "Admin123!":
             st.success("🔓 Admin access granted.")
             
             uploaded_file = st.file_uploader("Upload New Sales CSV", type=["csv"])
@@ -54,13 +54,27 @@ with st.sidebar:
                         'Gross': 'Gross Amount', 'Discount': 'Discounts'
                     }
                     new_df.rename(columns=col_map, inplace=True)
-                    save_shared_data(new_df)
-                    st.session_state["df"] = new_df
-                    st.success("✅ Shared Database Updated for all viewers!")
+                    
+                    # Add a column to identify which file this data came from
+                    file_name = uploaded_file.name
+                    new_df['Source File'] = file_name
+                    
+                    # Append new data to existing data (or create new if empty)
+                    if st.session_state["df"] is not None and not st.session_state["df"].empty:
+                        existing_df = st.session_state["df"]
+                        # Optional: Remove old data from the same file name to prevent duplicates if re-uploaded
+                        existing_df = existing_df[existing_df['Source File'] != file_name]
+                        updated_df = pd.concat([existing_df, new_df], ignore_index=True)
+                    else:
+                        updated_df = new_df
+                        
+                    save_shared_data(updated_df)
+                    st.session_state["df"] = updated_df
+                    st.success(f"✅ Data from {file_name} added to the shared database!")
                 except Exception as e:
                     st.error(f"Error parsing CSV: {e}")
 
-            if st.button("🔄 Reset Shared Data"):
+            if st.button("🔄 Reset & Clear ALL Data"):
                 if os.path.exists(DATA_FILE):
                     os.remove(DATA_FILE)
                 st.session_state["df"] = None
@@ -72,7 +86,7 @@ with st.sidebar:
 
 df = st.session_state["df"]
 
-if df is None:
+if df is None or df.empty:
     st.info("👈 No data available yet. An administrator must upload a POS Sales CSV to initialize the dashboard.")
     st.stop()
 
@@ -87,7 +101,7 @@ tab1, tab2, tab3 = st.tabs([
 # TAB 1: EXECUTIVE SUMMARY & CHARTS
 # ==========================================
 with tab1:
-    st.subheader("High-Level KPIs")
+    st.subheader("High-Level KPIs (All Uploaded Files Combined)")
     
     net_rev = df['Net Amount'].sum() if 'Net Amount' in df.columns else 0
     total_qty = df['Quantity'].sum() if 'Quantity' in df.columns else 0
@@ -124,37 +138,56 @@ with tab1:
 # ==========================================
 with tab2:
     st.subheader("Hierarchy Drilldown: Outlet ➔ Channel ➔ Category ➔ Item")
+    st.caption("Data is split into separate columns for each uploaded file for easy comparison.")
     
-    selected_outlet = st.selectbox("Select Store Outlet", ["All Outlets"] + sorted(df['Branch Name'].unique().tolist()))
-    
+    selected_outlet = st.selectbox("Select Store Outlet", ["All Outlets"] + sorted(df['Branch Name'].dropna().unique().tolist()))
     filtered_h_df = df if selected_outlet == "All Outlets" else df[df['Branch Name'] == selected_outlet]
     
-    selected_channel = st.selectbox("Select Sales Channel", ["All Channels"] + sorted(filtered_h_df['Channel'].unique().tolist()))
-    if selected_channel != "All Channels":
-        filtered_h_df = filtered_h_df[filtered_h_df['Channel'] == selected_channel]
-        
-    selected_cat = st.selectbox("Select Category", ["All Categories"] + sorted(filtered_h_df['Category'].dropna().unique().tolist()))
-    if selected_cat != "All Categories":
-        filtered_h_df = filtered_h_df[filtered_h_df['Category'] == selected_cat]
+    if 'Channel' in filtered_h_df.columns:
+        selected_channel = st.selectbox("Select Sales Channel", ["All Channels"] + sorted(filtered_h_df['Channel'].dropna().unique().tolist()))
+        if selected_channel != "All Channels":
+            filtered_h_df = filtered_h_df[filtered_h_df['Channel'] == selected_channel]
+            
+    if 'Category' in filtered_h_df.columns:
+        selected_cat = st.selectbox("Select Category", ["All Categories"] + sorted(filtered_h_df['Category'].dropna().unique().tolist()))
+        if selected_cat != "All Categories":
+            filtered_h_df = filtered_h_df[filtered_h_df['Category'] == selected_cat]
 
-    st.markdown("#### Item SKU Level Data Breakdown")
-    summary_cols = ['Branch Name', 'Channel', 'Category', 'Item Group Name', 'Quantity', 'Net Amount']
-    available_cols = [c for c in summary_cols if c in filtered_h_df.columns]
+    st.markdown("#### Item SKU Level Data Breakdown (By Source File)")
     
-    st.dataframe(filtered_h_df[available_cols], use_container_width=True)
+    # Define the hierarchical levels we want to use as the row index
+    index_cols = ['Branch Name', 'Channel', 'Category', 'Item Group Name']
+    available_index_cols = [c for c in index_cols if c in filtered_h_df.columns]
+    
+    # Pivot the table so that 'Source File' names become the columns
+    if 'Source File' in filtered_h_df.columns and available_index_cols:
+        try:
+            pivoted_h_df = filtered_h_df.pivot_table(
+                index=available_index_cols,
+                columns='Source File',
+                values=['Quantity', 'Net Amount'],
+                aggfunc='sum',
+                fill_value=0
+            )
+            st.dataframe(pivoted_h_df, use_container_width=True)
+        except Exception as e:
+            st.error("Not enough data to pivot by file yet.")
+            st.dataframe(filtered_h_df, use_container_width=True)
+    else:
+        st.dataframe(filtered_h_df, use_container_width=True)
 
 # ==========================================
 # TAB 3: ITEM NAME -> OUTLET QUANTITY MATRIX
 # ==========================================
 with tab3:
-    st.subheader("Item Sales Matrix across Outlets")
+    st.subheader("Item Sales Matrix across Outlets (All Uploaded Files Combined)")
     
     f1, f2, f3 = st.columns(3)
     
     with f1:
-        outlet_filter = st.selectbox("Filter Outlet Store", ["All Outlets"] + sorted(df['Branch Name'].unique().tolist()))
+        outlet_filter = st.selectbox("Filter Outlet Store", ["All Outlets"] + sorted(df['Branch Name'].dropna().unique().tolist()), key='tab3_outlet')
     with f2:
-        item_filter = st.selectbox("Select Item Name", ["All Items"] + sorted(df['Item Group Name'].dropna().unique().tolist()))
+        item_filter = st.selectbox("Select Item Name", ["All Items"] + sorted(df['Item Group Name'].dropna().unique().tolist()), key='tab3_item')
     with f3:
         search_kw = st.text_input("Search Item/SKU", placeholder="e.g. Burrito, Nachos...")
 
